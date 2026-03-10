@@ -42,9 +42,9 @@ class TestBasicSelect:
         assert tables(r) == {"t1": ["a", "b", "c"]}
 
     def test_select_star(self):
-        """SELECT * should register the table but no specific columns."""
+        """SELECT * should register the wildcard against the table."""
         r = extract("SELECT * FROM t1")
-        assert tables(r) == {"t1": []}
+        assert tables(r) == {"t1": ["*"]}
         assert ambiguous(r) == []
 
     def test_qualified_columns(self):
@@ -476,10 +476,33 @@ class TestEdgeCases:
         assert tables(r) == {"t1": ["a"]}
 
     def test_select_star_with_join(self):
-        """SELECT * with a JOIN: tables registered, no columns extracted."""
+        """SELECT * with a JOIN: wildcard attributed to every table in scope."""
         r = extract("SELECT * FROM t1 JOIN t2 ON t1.id = t2.id")
-        assert "t1" in tables(r)
-        assert "t2" in tables(r)
-        # ON columns are extracted
-        assert "id" in tables(r)["t1"]
-        assert "id" in tables(r)["t2"]
+        assert tables(r) == {"t1": ["*", "id"], "t2": ["*", "id"]}
+
+    def test_qualified_wildcard(self):
+        """SELECT t1.* should attribute * only to that table."""
+        r = extract("SELECT t1.* FROM t1")
+        assert tables(r) == {"t1": ["*"]}
+
+    def test_qualified_wildcard_with_join(self):
+        """SELECT t1.* in a JOIN only attributes * to t1."""
+        r = extract(
+            "SELECT t1.*, t2.b FROM t1 JOIN t2 ON t1.id = t2.id"
+        )
+        assert tables(r) == {"t1": ["*", "id"], "t2": ["b", "id"]}
+
+    def test_qualified_wildcard_with_alias(self):
+        """SELECT x.* resolves the alias back to the real table."""
+        r = extract("SELECT x.* FROM t1 AS x")
+        assert tables(r) == {"t1": ["*"]}
+
+    def test_wildcard_union(self):
+        """SELECT * in each UNION branch attributes * to respective tables."""
+        r = extract("SELECT * FROM t1 UNION SELECT * FROM t2")
+        assert tables(r) == {"t1": ["*"], "t2": ["*"]}
+
+    def test_wildcard_not_from_count_star(self):
+        """COUNT(*) must NOT produce a wildcard column."""
+        r = extract("SELECT COUNT(*) FROM t1")
+        assert tables(r) == {"t1": []}

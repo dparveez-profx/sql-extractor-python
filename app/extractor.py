@@ -95,6 +95,7 @@ class _ExtractionContext:
         for key in ("select", "select_distinct"):
             if key in ast:
                 self._collect_columns(ast[key], col_refs)
+                self._collect_wildcards(ast[key], alias_map, tables_in_scope)
 
         for key in ("where", "having"):
             if key in ast:
@@ -185,6 +186,38 @@ class _ExtractionContext:
             for jk in _JOIN_KEYS:
                 if jk in node:
                     self._collect_on_columns(node[jk], col_refs)
+
+    # ── Wildcard (*) collection ───────────────────────────────────
+
+    def _collect_wildcards(
+        self,
+        node,
+        alias_map: dict[str, str],
+        tables_in_scope: list[str],
+    ) -> None:
+        """Find ``{"all_columns": ...}`` nodes and attribute ``*``."""
+        if isinstance(node, list):
+            for item in node:
+                self._collect_wildcards(item, alias_map, tables_in_scope)
+            return
+
+        if not isinstance(node, dict):
+            return
+
+        if "all_columns" not in node:
+            return
+
+        qualifier = node["all_columns"]
+        if isinstance(qualifier, str):
+            # Qualified: SELECT t1.* → attribute * to that table
+            real_table = alias_map.get(qualifier, qualifier)
+            self._ensure_table(real_table)
+            self._tables[real_table].add("*")
+        else:
+            # Unqualified: SELECT * → attribute * to every table in scope
+            for table in tables_in_scope:
+                self._ensure_table(table)
+                self._tables[table].add("*")
 
     # ── Column reference collection ─────────────────────────────────
 
