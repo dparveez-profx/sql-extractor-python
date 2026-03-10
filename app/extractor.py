@@ -4,6 +4,11 @@ Core SQL extraction logic.
 Parses a SQL query using mo-sql-parsing and extracts a mapping of
 table names to the columns referenced against them, plus a list of
 ambiguous columns that cannot be attributed to a single table.
+
+When an optional *schema* (table → columns map) is provided, ambiguous
+columns are resolved by looking up which schema tables actually own
+them.  If a column belongs to more than one in-scope table according
+to the schema an ``AmbiguousColumnError`` is raised.
 """
 
 from __future__ import annotations
@@ -24,7 +29,23 @@ _JOIN_KEYS = {
 }
 
 
-def extract(sql: str) -> dict:
+class AmbiguousColumnError(Exception):
+    """Raised when a column cannot be resolved to a single table even
+    after consulting the provided schema."""
+
+    def __init__(self, column: str, tables: list[str]) -> None:
+        self.column = column
+        self.tables = sorted(tables)
+        super().__init__(
+            f"Column '{column}' is ambiguous — present in tables: "
+            f"{', '.join(self.tables)}"
+        )
+
+
+def extract(
+    sql: str,
+    schema: dict[str, list[str]] | None = None,
+) -> dict:
     """
     Parse *sql* and return a dict with two keys:
 
@@ -36,9 +57,15 @@ def extract(sql: str) -> dict:
     table name even when an alias is used.  Unqualified columns are
     attributed to the single table in scope when only one table exists;
     otherwise they land in *ambiguous*.
+
+    If *schema* is supplied (a mapping of ``{table_name: [col, …]}``),
+    every ambiguous column is looked up in the schema.  When exactly one
+    in-scope table contains that column it is resolved automatically.
+    When **multiple** in-scope tables contain it, an
+    ``AmbiguousColumnError`` is raised.
     """
     ast = sql_parse(sql)
-    ctx = _ExtractionContext()
+    ctx = _ExtractionContext(schema=schema)
     ctx.process_query(ast)
     return ctx.result()
 
@@ -49,11 +76,19 @@ def extract(sql: str) -> dict:
 class _ExtractionContext:
     """Mutable accumulator that walks an mo-sql-parsing AST."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        schema: dict[str, list[str]] | None = None,
+    ) -> None:
         # {real_table_name: set(column_names)}
         self._tables: dict[str, set[str]] = {}
         # columns we cannot resolve
         self._ambiguous: set[str] = set()
+        # optional real schema for disambiguation
+        # normalise to sets for fast lookup
+        self._schema: dict[str, set[str]] | None = (
+            {t: set(cols) for t, cols in schema.items()} if schema else None
+        )
 
     # ── public entry point ──────────────────────────────────────────
 
@@ -296,6 +331,8 @@ class _ExtractionContext:
                 table = tables_in_scope[0]
                 self._ensure_table(table)
                 self._tables[table].add(column)
+            elif self._schema is not None:
+                self._disambiguate(column, tables_in_scope)
             else:
                 self._ambiguous.add(column)
         # len > 2: schema.table.col – treat first two as qualifier
@@ -305,6 +342,40 @@ class _ExtractionContext:
             real_table = alias_map.get(qualifier, qualifier)
             self._ensure_table(real_table)
             self._tables[real_table].add(column)
+
+    # ── Schema-based disambiguation ────────────────────────────────
+
+    def _disambiguate(
+        self,
+        column: str,
+        tables_in_scope: list[str],
+    ) -> None:
+        """Resolve *column* using ``self._schema``.
+
+        Look at every in-scope table that appears in the schema and
+        check whether *column* is listed there.
+
+        * **1 match** → attribute the column to that table.
+        * **>1 match** → raise ``AmbiguousColumnError``.
+        * **0 matches** → column is not in the schema at all; leave it
+          in the *ambiguous* list (the user's schema may be incomplete).
+        """
+        assert self._schema is not None  # caller guarantees this
+
+        owners: list[str] = [
+            table
+            for table in tables_in_scope
+            if table in self._schema and column in self._schema[table]
+        ]
+
+        if len(owners) == 1:
+            self._ensure_table(owners[0])
+            self._tables[owners[0]].add(column)
+        elif len(owners) > 1:
+            raise AmbiguousColumnError(column, owners)
+        else:
+            # Column not found in any schema table – keep it ambiguous
+            self._ambiguous.add(column)
 
     # ── Helpers ─────────────────────────────────────────────────────
 
